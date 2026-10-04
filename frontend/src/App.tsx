@@ -7,6 +7,7 @@ import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { Badge, Button, Layout, Menu, Space, Tag, Typography } from 'antd';
 import {
   AppstoreOutlined,
+  AuditOutlined,
   BarChartOutlined,
   DashboardOutlined,
   ExperimentOutlined,
@@ -16,6 +17,7 @@ import { ROUTES } from './router';
 import { usePlotStore } from './stores/plotStore';
 import { useReplantStore } from './stores/replantStore';
 import { useSurveyStore } from './stores/surveyStore';
+import { useLedgerStore } from './stores/ledgerStore';
 import { percentText } from './utils/rate';
 
 const { Header, Sider, Content, Footer } = Layout;
@@ -24,6 +26,7 @@ const { Header, Sider, Content, Footer } = Layout;
 function selectedKey(pathname: string): string {
   if (pathname.startsWith('/plots/')) return ROUTES.plots;
   if (pathname.startsWith('/surveys')) return ROUTES.surveys;
+  if (pathname.startsWith('/ledgers')) return ROUTES.ledgers;
   if (pathname.startsWith('/replants')) return ROUTES.replants;
   return ROUTES.plots;
 }
@@ -38,13 +41,15 @@ export default function App() {
   const error = usePlotStore((state) => state.error);
   const loadAll = usePlotStore((state) => state.loadAll);
   const initSurvey = useSurveyStore((state) => state.init);
+  const initLedger = useLedgerStore((state) => state.init);
   const initReplant = useReplantStore((state) => state.init);
 
   useEffect(() => {
     void loadAll();
     void initSurvey();
+    void initLedger();
     void initReplant();
-  }, [loadAll, initSurvey, initReplant]);
+  }, [loadAll, initSurvey, initLedger, initReplant]);
 
   const currentPlot = plots.find((plot) => plot.id === currentPlotId) ?? null;
   const currentStat = currentPlot === null ? null : statOf(currentPlot.id);
@@ -68,7 +73,8 @@ export default function App() {
           onClick={({ key }) => navigate(key)}
           items={[
             { key: ROUTES.plots, icon: <AppstoreOutlined />, label: '修复地块台账' },
-            { key: ROUTES.surveys, icon: <ExperimentOutlined />, label: '成活率验收台' },
+            { key: ROUTES.surveys, icon: <ExperimentOutlined />, label: '外业验收台' },
+            { key: ROUTES.ledgers, icon: <AuditOutlined />, label: '项目部台账对账' },
             { key: ROUTES.replants, icon: <ToolOutlined />, label: '补植计划' },
           ]}
         />
@@ -77,10 +83,13 @@ export default function App() {
             <DashboardOutlined /> 地块 {counts.plots ?? 0} · 批次 {counts.seedlings ?? 0}
           </div>
           <div>
-            <BarChartOutlined /> 栽植 {counts.plantings ?? 0} · 验收 {counts.surveys ?? 0}
+            <BarChartOutlined /> 栽植 {counts.plantings ?? 0} · 外业验收 {counts.surveys ?? 0}
           </div>
           <div>
-            <ToolOutlined /> 补植 {counts.replants ?? 0} · 结构 v{String(counts.schemaVersion ?? '-')}
+            <AuditOutlined /> 项目部台账 {counts.plotLedgers ?? 0} · 补植 {counts.replants ?? 0}
+          </div>
+          <div>
+            <ToolOutlined /> 结构 v{String(counts.schemaVersion ?? '-')}
           </div>
         </div>
       </Sider>
@@ -112,7 +121,11 @@ export default function App() {
                 <Tag color={currentStat.surveyCount === 0 ? 'default' : 'green'}>
                   {currentStat.surveyCount === 0 ? '尚未验收' : `成活率 ${percentText(currentStat.latestRate)}`}
                 </Tag>
-                <Tag color={currentPlot.missingCount > 0 ? 'orange' : 'green'}>缺株 {currentPlot.missingCount} 株</Tag>
+                {currentStat.suspended ? (
+                  <Tag color="red">对账挂起 {currentStat.suspendedCount} 条</Tag>
+                ) : (
+                  <Tag color={currentStat.missingCount > 0 ? 'orange' : 'green'}>缺株 {currentStat.missingCount} 株</Tag>
+                )}
               </>
             ) : (
               <Tag>未选择地块</Tag>

@@ -14,6 +14,7 @@ import {
   putReplant,
   removeReplant,
   resetDatabase,
+  ROW_REVISION,
   type DatabaseSnapshot,
 } from '../utils/db';
 import { nowIso, uuid } from '../utils/id';
@@ -44,7 +45,7 @@ export interface ReplantStoreState {
   saveDraft: (replantId: string) => Promise<void>;
   createReplant: (draft: ReplantDraft) => Promise<Replant>;
   deleteReplant: (replantId: string) => Promise<void>;
-  /** 推进到下一状态；进入「已补植」时回写地块缺株数并重算成活率 */
+  /** 推进到下一状态；进入「已补植」时回写地块与项目部台账缺株数（外业测次不变） */
   advance: (replantId: string) => Promise<ReplantState | null>;
   setState: (replantId: string, state: ReplantState) => Promise<void>;
   batchAdvance: () => Promise<number>;
@@ -104,6 +105,11 @@ export const useReplantStore = create<ReplantStoreState>((set, get) => ({
   },
 
   async createReplant(draft) {
+    // 挂起期间不生成补植计划（与验收台一键生成同口径，防止从别的入口绕过）
+    const stat = usePlotStore.getState().statOf(draft.plotId);
+    if (stat.suspended) {
+      throw new Error('该地块存在挂起待复核的对账记录，复核通过前不能新建补植计划');
+    }
     const stamp = nowIso();
     const row: Replant = {
       id: uuid('replant'),
@@ -114,7 +120,7 @@ export const useReplantStore = create<ReplantStoreState>((set, get) => ({
       state: draft.state,
       createdAt: stamp,
       updatedAt: stamp,
-      revision: 2,
+      revision: ROW_REVISION,
     };
     await putReplant(row);
     set({ revision: get().revision + 1 });
@@ -140,7 +146,10 @@ export const useReplantStore = create<ReplantStoreState>((set, get) => ({
     await usePlotStore.getState().refreshCounts();
     set({
       revision: get().revision + 1,
-      lastMessage: next === '已补植' ? '已标记补植完成，地块缺株数与成活率已回写' : `状态已推进为「${next}」`,
+      lastMessage:
+        next === '已补植'
+          ? '已标记补植完成，地块与项目部台账缺株数已回写（外业验收测次不变）'
+          : `状态已推进为「${next}」`,
     });
     return next;
   },

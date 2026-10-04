@@ -227,13 +227,19 @@ export default function PlotList() {
     },
     {
       title: '缺株数',
-      dataIndex: 'missingCount',
       key: 'missingCount',
-      width: 96,
-      align: 'right',
-      render: (value: number) => (
-        <Typography.Text type={value > 0 ? 'warning' : 'secondary'}>{value} 株</Typography.Text>
-      ),
+      width: 150,
+      render: (_value, record) => {
+        const stat = statOf(record.id);
+        if (stat.suspended) {
+          return <Tag color="red">挂起 {stat.suspendedCount} 条待复核</Tag>;
+        }
+        return (
+          <Typography.Text type={stat.missingCount > 0 ? 'warning' : 'secondary'}>
+            {stat.missingCount} 株
+          </Typography.Text>
+        );
+      },
     },
     {
       title: '操作',

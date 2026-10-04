@@ -1,7 +1,10 @@
 /**
  * 成活率验收（Survey）
  * 按测次登记成活株数与平均株高，成活率由成活株数 / 栽植总株数派生。
+ * 归属外业验收队（owner = 'field'）：只记成活株数与株高，
+ * 栽植总株数与缺株数归项目部地块台账（PlotLedger），两边分开记账、按地块 + 测次对账。
  */
+import type { DataOwner } from './owner';
 
 /** 成活率等级：优 / 良 / 一般 / 差 */
 export type RateLevel = 'excellent' | 'good' | 'fair' | 'poor';
@@ -33,6 +36,8 @@ export interface Survey {
   grade: RateLevel;
   /** 该等级是否被人工调整过 */
   gradeManual: boolean;
+  /** 数据归属：验收测次一律归外业验收队（旧数据升级时补 'field'） */
+  owner: DataOwner;
   createdAt: string;
   updatedAt: string;
   revision: number;

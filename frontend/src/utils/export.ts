@@ -7,9 +7,12 @@ import { DB_NAME, DB_SCHEMA_VERSION } from './db';
 import type { Plot } from '../types/plot';
 import type { Survey } from '../types/survey';
 import type { Planting } from '../types/planting';
+import type { PlotLedger } from '../types/plotLedger';
 import type { Seedling } from '../types/seedling';
 import type { Replant } from '../types/replant';
 import { RATE_LEVEL_LABEL } from '../types/survey';
+import { RECONCILE_STATE_LABEL } from '../types/plotLedger';
+import { reconcilePlot } from './reconcile';
 import { calcSurvivalRate, percentText, round1 } from './rate';
 import { stampSuffix } from './id';
 
@@ -45,7 +48,10 @@ export interface SnapshotParseResult {
   snapshot: DatabaseSnapshot | null;
 }
 
-/** 解析并校验导入的 JSON 存档 */
+/**
+ * 解析并校验导入的 JSON 存档。
+ * plotLedgers 为 v3 新增，旧版存档可以没有（导入时按现有测次补建），故不作为必填数组。
+ */
 export function parseSnapshot(text: string): SnapshotParseResult {
   let raw: unknown;
   try {
@@ -83,6 +89,7 @@ export function exportSummaryCsv(
   plantings: Planting[],
   surveys: Survey[],
   replants: Replant[],
+  ledgers: PlotLedger[] = [],
 ): string {
   const header = [
     '地块名',
@@ -100,7 +107,9 @@ export function exportSummaryCsv(
     '最新成活率(%)',
     '判定等级',
     '平均株高(cm)',
+    '对账状态',
     '缺株数(株)',
+    '挂起条数',
     '补植计划数',
     '最近补植日期',
   ];
@@ -113,6 +122,12 @@ export function exportSummaryCsv(
     const total = plotPlantings.reduce((acc, row) => acc + row.count, 0);
     const latest = plotSurveys.length > 0 ? plotSurveys[plotSurveys.length - 1] : null;
     const rate = latest ? calcSurvivalRate(latest.aliveCount, total) : 0;
+    // 缺株数与对账状态以项目部台账为准
+    const reconciled = reconcilePlot(plot.id, ledgers, surveys);
+    const latestMatched = reconciled.filter((row) => row.reconcileState === 'matched').at(-1);
+    const suspendedCount = reconciled.filter((row) => row.reconcileState === 'suspended').length;
+    const reconcileState = suspendedCount > 0 ? 'suspended' : latestMatched ? 'matched' : 'pending';
+    const missing = suspendedCount > 0 ? '' : latestMatched ? latestMatched.missingCount : plot.missingCount;
     lines.push(
       [
         plot.name,
@@ -123,14 +138,16 @@ export function exportSummaryCsv(
         plot.state,
         plotSeedlings.length,
         plotSeedlings.reduce((acc, row) => acc + row.quantity, 0),
-        total,
+        latestMatched?.plantedTotal ?? total,
         plotSurveys.length,
         latest ? `第 ${latest.round} 测次` : '未验收',
         latest ? latest.aliveCount : 0,
         round1(rate),
         latest ? RATE_LEVEL_LABEL[latest.grade] : '—',
         latest ? latest.avgHeightCm : 0,
-        plot.missingCount,
+        RECONCILE_STATE_LABEL[reconcileState],
+        missing,
+        suspendedCount,
         plotReplants.length,
         plot.lastReplantDate || '—',
       ]
@@ -138,7 +155,7 @@ export function exportSummaryCsv(
         .join(','),
     );
   });
-  return `\uFEFF${lines.join('\n')}`;
+  return `﻿${lines.join('\n')}`;
 }
 
 /** 导出成活率汇总 CSV 文件 */
@@ -148,9 +165,10 @@ export function exportSummaryCsvFile(
   plantings: Planting[],
   surveys: Survey[],
   replants: Replant[],
+  ledgers: PlotLedger[] = [],
 ): string {
   const filename = `红树林成活率汇总-${stampSuffix()}.csv`;
-  download(filename, exportSummaryCsv(plots, seedlings, plantings, surveys, replants), 'text/csv;charset=utf-8');
+  download(filename, exportSummaryCsv(plots, seedlings, plantings, surveys, replants, ledgers), 'text/csv;charset=utf-8');
   return filename;
 }
 
@@ -173,6 +191,7 @@ export function buildSummaryText(
   plantings: Planting[],
   surveys: Survey[],
   replants: Replant[],
+  ledgers: PlotLedger[] = [],
 ): string {
   const lines: string[] = [`【红树林修复成活率通报】共 ${plots.length} 个地块`];
   plots.forEach((plot) => {
@@ -181,10 +200,14 @@ export function buildSummaryText(
     const latest = plotSurveys.length > 0 ? plotSurveys[plotSurveys.length - 1] : null;
     const rate = latest ? calcSurvivalRate(latest.aliveCount, total) : 0;
     const pending = replants.filter((row) => row.plotId === plot.id && row.state !== '已复核').length;
+    const reconciled = reconcilePlot(plot.id, ledgers, surveys);
+    const suspended = reconciled.filter((row) => row.reconcileState === 'suspended').length;
+    const latestMatched = reconciled.filter((row) => row.reconcileState === 'matched').at(-1);
+    const missingText = suspended > 0 ? `挂起 ${suspended} 条` : `缺株 ${latestMatched ? latestMatched.missingCount : plot.missingCount} 株`;
     lines.push(
-      `· ${plot.name}（${plot.tideZone}潮位带 / ${plot.substrate}）栽植 ${total} 株，最新成活率 ${
+      `· ${plot.name}（${plot.tideZone}潮位带 / ${plot.substrate}）栽植 ${latestMatched?.plantedTotal ?? total} 株，最新成活率 ${
         latest ? percentText(rate) : '未验收'
-      }，缺株 ${plot.missingCount} 株，待办补植 ${pending} 条`,
+      }，${missingText}，待办补植 ${pending} 条`,
     );
   });
   return lines.join('\n');

@@ -59,6 +59,7 @@ export default function ReplantPlan() {
   const seedlings = usePlotStore((state) => state.seedlings);
   const plantings = usePlotStore((state) => state.plantings);
   const surveys = usePlotStore((state) => state.surveys);
+  const ledgers = usePlotStore((state) => state.ledgers);
   const statOf = usePlotStore((state) => state.statOf);
   const ready = usePlotStore((state) => state.ready);
 
@@ -106,13 +107,15 @@ export default function ReplantPlan() {
     const missing = rows.reduce((acc, row) => acc + row.missingCount, 0);
     const reviewed = rows.filter((row) => row.state === '已复核').length;
     const pending = rows.filter((row) => row.state === '待补植').length;
+    const suspendedPlots = plots.filter((plot) => statOf(plot.id).suspended);
     return {
       missing,
       pending,
       reviewed,
+      suspendedCount: suspendedPlots.length,
       reviewPct: rows.length === 0 ? 0 : Math.round((reviewed / rows.length) * 1000) / 10,
     };
-  }, [rows]);
+  }, [rows, plots, statOf]);
 
   const openCreate = (): void => {
     setEditing(null);
@@ -143,6 +146,11 @@ export default function ReplantPlan() {
   const handleSubmit = async (): Promise<void> => {
     try {
       const values = await form.validateFields();
+      // 挂起期间不生成补植计划：手动新建也不能绕过对账
+      if (statOf(values.plotId).suspended) {
+        message.warning('该地块存在挂起待复核的对账记录，复核通过前不能新建补植计划', 6);
+        return;
+      }
       setSubmitting(true);
       const payload: ReplantDraft = {
         plotId: values.plotId,
@@ -182,7 +190,7 @@ export default function ReplantPlan() {
   };
 
   const handleExportCsv = (): void => {
-    const filename = exportSummaryCsvFile(plots, seedlings, plantings, surveys, rows);
+    const filename = exportSummaryCsvFile(plots, seedlings, plantings, surveys, rows, ledgers);
     message.success(`已导出成活率汇总 ${filename}`);
   };
 
@@ -225,6 +233,8 @@ export default function ReplantPlan() {
             最新成活率{' '}
             {statOf(record.plotId).surveyCount > 0 ? percentText(statOf(record.plotId).latestRate) : '未验收'} ·
             栽植 {statOf(record.plotId).plantTotal.toLocaleString('zh-CN')} 株
+            {statOf(record.plotId).suspended ? ' · ' : ''}
+            {statOf(record.plotId).suspended ? <Tag color="red">对账挂起</Tag> : null}
           </Typography.Text>
         </Space>
       ),
@@ -372,6 +382,13 @@ export default function ReplantPlan() {
       <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 14 }}>
         <StatBadge label="补植计划" value={rows.length} suffix="条" tone="primary" />
         <StatBadge label="待补植" value={stats.pending} suffix="条" tone={stats.pending > 0 ? 'warning' : 'default'} />
+        <StatBadge
+          label="挂起地块"
+          value={stats.suspendedCount}
+          suffix="块"
+          tone={stats.suspendedCount > 0 ? 'danger' : 'default'}
+          hint="与外业对账挂起的地块，挂起期间不生成补植计划"
+        />
         <StatBadge label="缺株合计" value={stats.missing.toLocaleString('zh-CN')} suffix="株" tone="danger" />
         <StatBadge
           label="复核完成率"
@@ -388,6 +405,16 @@ export default function ReplantPlan() {
           hint="IndexedDB 库名与结构版本号；升级时会按 version().stores() 自动迁移"
         />
       </div>
+
+      {stats.suspendedCount > 0 ? (
+        <Alert
+          type="error"
+          showIcon
+          style={{ marginBottom: 14 }}
+          message={`有 ${stats.suspendedCount} 个地块对账挂起，挂起期间不生成补植计划`}
+          description="请先到「项目部台账对账」复核：补齐外业测次或修正栽植总株数，对账一致后再发补植计划，避免按过期成活率补植。"
+        />
+      ) : null}
 
       {lastMessage !== '' ? (
         <Alert type="info" showIcon style={{ marginBottom: 14 }} message={lastMessage} />
@@ -515,7 +542,8 @@ export default function ReplantPlan() {
             </Form.Item>
           </Space>
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            状态推进到「已补植」时，会自动回写地块缺株数并重算最新一次验收的成活率。
+            缺株数以项目部台账「栽植总株数 − 最新外业成活株数」为准；对账挂起的地块不能新建补植计划。
+            状态推进到「已补植」时，只回写地块与项目部台账缺株数，外业验收测次保持不变。
           </Typography.Text>
         </Form>
       </Modal>

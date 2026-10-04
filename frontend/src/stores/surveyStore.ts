@@ -5,11 +5,20 @@
  */
 import { create } from 'zustand';
 import type { RateLevel, Survey } from '../types/survey';
-import { db, initDatabase, patchSurveyGrades, putSurvey, removeSurvey } from '../utils/db';
+import {
+  db,
+  initDatabase,
+  patchSurveyGrades,
+  putSurvey,
+  removeSurvey,
+  submitFieldSurvey,
+  ROW_REVISION,
+} from '../utils/db';
 import type { SurvivalSummary } from '../hooks/useSurvivalRate';
 import { nowIso, uuid } from '../utils/id';
 import { calcSurvivalRate, rateLevel } from '../utils/rate';
 import type { SurveyDraft } from '../types/survey';
+import { plotHasSuspended } from '../utils/reconcile';
 import { usePlotStore } from './plotStore';
 
 /** 验收筛选条件（地块 + 等级 + 关键字 + 日期区间） */
@@ -37,7 +46,7 @@ interface SurveyStoreState {
   resetFilters: () => void;
   setSelectedIds: (ids: string[]) => void;
   setGradeDraft: (level: RateLevel) => void;
-  createSurvey: (draft: SurveyDraft) => Promise<Survey>;
+  createSurvey: (draft: SurveyDraft) => Promise<{ row: Survey; duplicated: boolean }>;
   updateSurvey: (surveyId: string, draft: SurveyDraft) => Promise<void>;
   deleteSurvey: (surveyId: string) => Promise<void>;
   /** 批量调整成活率等级（人工复核） */
@@ -97,13 +106,15 @@ export const useSurveyStore = create<SurveyStoreState>((set, get) => ({
       survivalRate,
       grade: rateLevel(survivalRate),
       gradeManual: false,
+      owner: 'field',
       createdAt: stamp,
       updatedAt: stamp,
-      revision: 2,
+      revision: ROW_REVISION,
     };
-    await putSurvey(row);
+    // 离线交回：同一地块同一测次重复交只留一份（insert-if-absent）
+    const result = await submitFieldSurvey(row);
     set({ revision: get().revision + 1 });
-    return row;
+    return result;
   },
 
   async updateSurvey(surveyId, draft) {
@@ -138,10 +149,20 @@ export const useSurveyStore = create<SurveyStoreState>((set, get) => ({
   },
 
   async generateReplant(plotId) {
-    const summary = get().summaryOf(plotId);
     const plot = usePlotStore.getState().plots.find((row) => row.id === plotId);
     if (!plot) return '地块不存在，无法生成补植计划';
-    const missing = summary.suggestReplant;
+
+    const { ledgers, surveys } = usePlotStore.getState();
+
+    // 挂起期间不生成补植计划：先等项目部与外业复核对上账
+    if (plotHasSuspended(plotId, ledgers, surveys)) {
+      return '该地块存在挂起待复核的对账记录，复核通过前不生成补植计划';
+    }
+
+    // 缺株数按 项目部栽植总株数 − 最新外业成活株数（取最新一条对账一致的台账）
+    const reconciled = usePlotStore.getState().ledgersOf(plotId).filter((row) => row.reconcileState === 'matched');
+    const latest = reconciled.at(-1);
+    const missing = latest ? latest.missingCount : get().summaryOf(plotId).suggestReplant;
     if (missing <= 0) return '该地块当前无缺株，无需生成补植计划';
     const species = usePlotStore.getState().seedlings.find((row) => row.plotId === plotId)?.species ?? '秋茄';
     const stamp = nowIso();
@@ -154,7 +175,7 @@ export const useSurveyStore = create<SurveyStoreState>((set, get) => ({
       state: '待补植',
       createdAt: stamp,
       updatedAt: stamp,
-      revision: 2,
+      revision: ROW_REVISION,
     });
     set({ revision: get().revision + 1, lastMessage: `已为「${plot.name}」生成补植计划：缺株 ${missing} 株` });
     return `已生成补植计划：缺株 ${missing} 株`;

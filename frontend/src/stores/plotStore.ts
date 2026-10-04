@@ -9,6 +9,7 @@ import type { Plot, PlotDraft, Substrate, TideZone } from '../types/plot';
 import type { Seedling } from '../types/seedling';
 import type { Planting } from '../types/planting';
 import type { Survey, RateLevel } from '../types/survey';
+import type { PlotLedger } from '../types/plotLedger';
 import {
   DB_SCHEMA_VERSION,
   ROW_REVISION,
@@ -19,6 +20,7 @@ import {
   removePlot,
 } from '../utils/db';
 import { buildSurvivalSummary, type SurvivalSummary } from '../hooks/useSurvivalRate';
+import { reconcilePlot, type ReconciledLedger } from '../utils/reconcile';
 import { nowIso, uuid } from '../utils/id';
 
 /** 地块筛选条件（关键字 + 潮位带 + 底质），由 <FilterBar> 同步到 URL query */
@@ -35,7 +37,7 @@ export interface PlotStat {
   seedlingCount: number;
   /** 进场苗木合计（株） */
   seedlingQuantity: number;
-  /** 栽植总株数（株） */
+  /** 栽植总株数（株）——优先取项目部台账最新值，回退栽植记录合计 */
   plantTotal: number;
   /** 验收测次数 */
   surveyCount: number;
@@ -45,8 +47,14 @@ export interface PlotStat {
   level: RateLevel;
   /** 成活率环比变化（百分点） */
   trend: number;
-  /** 建议补植株数 */
+  /** 建议补植株数（最新一致台账算出的缺株数；无台账时按栽植 − 成活兜底） */
   suggestReplant: number;
+  /** 最新缺株数（项目部台账口径） */
+  missingCount: number;
+  /** 是否存在挂起待复核的对账（挂起期间不生成补植计划） */
+  suspended: boolean;
+  /** 挂起待复核的条数 */
+  suspendedCount: number;
 }
 
 const EMPTY_FILTERS: PlotFilters = { keyword: '', tideZone: 'all', substrate: 'all' };
@@ -74,6 +82,7 @@ interface PlotStoreState {
   seedlings: Seedling[];
   plantings: Planting[];
   surveys: Survey[];
+  ledgers: PlotLedger[];
   currentPlotId: string | null;
   loading: boolean;
   ready: boolean;
@@ -82,6 +91,8 @@ interface PlotStoreState {
   counts: Record<string, number>;
   stats: Record<string, PlotStat>;
   summaries: Record<string, SurvivalSummary>;
+  /** 地块 → 对账后台账视图（按测次升序） */
+  reconciliations: Record<string, ReconciledLedger[]>;
   /** 订阅 Dexie 并载入全部派生数据（幂等，可重复调用） */
   loadAll: () => Promise<void>;
   selectPlot: (plotId: string | null) => void;
@@ -93,6 +104,8 @@ interface PlotStoreState {
   visiblePlots: () => Plot[];
   statOf: (plotId: string) => PlotStat;
   summaryOf: (plotId: string | null) => SurvivalSummary;
+  /** 取地块对账后的台账行（按测次升序） */
+  ledgersOf: (plotId: string) => ReconciledLedger[];
   refreshCounts: () => Promise<void>;
 }
 
@@ -105,6 +118,9 @@ const EMPTY_STAT: Omit<PlotStat, 'plotId'> = {
   level: 'poor',
   trend: 0,
   suggestReplant: 0,
+  missingCount: 0,
+  suspended: false,
+  suspendedCount: 0,
 };
 
 let subscribed = false;
@@ -114,6 +130,7 @@ export const usePlotStore = create<PlotStoreState>((set, get) => ({
   seedlings: [],
   plantings: [],
   surveys: [],
+  ledgers: [],
   currentPlotId: readCurrentPlotId(),
   loading: true,
   ready: false,
@@ -122,6 +139,7 @@ export const usePlotStore = create<PlotStoreState>((set, get) => ({
   counts: {},
   stats: {},
   summaries: {},
+  reconciliations: {},
 
   async loadAll() {
     set({ loading: true, error: '' });
@@ -130,31 +148,41 @@ export const usePlotStore = create<PlotStoreState>((set, get) => ({
       if (!subscribed) {
         subscribed = true;
         liveQuery(async () => {
-          const [plots, seedlings, plantings, surveys] = await Promise.all([
+          const [plots, seedlings, plantings, surveys, ledgers] = await Promise.all([
             db.plots.toArray(),
             db.seedlings.toArray(),
             db.plantings.toArray(),
             db.surveys.toArray(),
+            db.plotLedgers.toArray(),
           ]);
-          return { plots, seedlings, plantings, surveys };
+          return { plots, seedlings, plantings, surveys, ledgers };
         }).subscribe({
-          next: ({ plots, seedlings, plantings, surveys }) => {
+          next: ({ plots, seedlings, plantings, surveys, ledgers }) => {
             const stats: Record<string, PlotStat> = {};
             const summaries: Record<string, SurvivalSummary> = {};
+            const reconciliations: Record<string, ReconciledLedger[]> = {};
             plots.forEach((plot) => {
               const plotSeedlings = seedlings.filter((row) => row.plotId === plot.id);
               const summary = buildSurvivalSummary(plot.id, surveys, plantings);
+              const reconciled = reconcilePlot(plot.id, ledgers, surveys);
+              reconciliations[plot.id] = reconciled;
+              const latestMatched = reconciled.filter((row) => row.reconcileState === 'matched').at(-1);
+              const suspendedRows = reconciled.filter((row) => row.reconcileState === 'suspended');
               summaries[plot.id] = summary;
               stats[plot.id] = {
                 plotId: plot.id,
                 seedlingCount: plotSeedlings.length,
                 seedlingQuantity: plotSeedlings.reduce((acc, row) => acc + row.quantity, 0),
-                plantTotal: summary.totalCount,
+                // 项目部台账有栽植总株数时以台账为准，否则回退栽植记录合计
+                plantTotal: latestMatched?.plantedTotal ?? summary.totalCount,
                 surveyCount: summary.points.length,
                 latestRate: summary.latestRate,
                 level: summary.level,
                 trend: summary.trend,
-                suggestReplant: summary.suggestReplant,
+                suggestReplant: latestMatched ? latestMatched.missingCount : summary.suggestReplant,
+                missingCount: latestMatched?.missingCount ?? plot.missingCount,
+                suspended: suspendedRows.length > 0,
+                suspendedCount: suspendedRows.length,
               };
             });
             const sorted = [...plots].sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN'));
@@ -165,8 +193,10 @@ export const usePlotStore = create<PlotStoreState>((set, get) => ({
               seedlings,
               plantings,
               surveys,
+              ledgers,
               stats,
               summaries,
+              reconciliations,
               loading: false,
               ready: true,
               error: '',
@@ -266,6 +296,10 @@ export const usePlotStore = create<PlotStoreState>((set, get) => ({
   summaryOf(plotId) {
     if (plotId === null) return buildSurvivalSummary('', [], []);
     return get().summaries[plotId] ?? buildSurvivalSummary(plotId, [], []);
+  },
+
+  ledgersOf(plotId) {
+    return get().reconciliations[plotId] ?? [];
   },
 
   async refreshCounts() {

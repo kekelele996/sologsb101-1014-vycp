@@ -8,8 +8,10 @@ import type { Plot } from '../types/plot';
 import type { Seedling } from '../types/seedling';
 import type { Planting } from '../types/planting';
 import type { Survey } from '../types/survey';
+import type { PlotLedger } from '../types/plotLedger';
 import type { Replant } from '../types/replant';
 import { calcSurvivalRate, rateLevel } from './rate';
+import { reconcileLedger } from './reconcile';
 
 const SEED_TIME = '2025-01-06T02:00:00.000Z';
 
@@ -32,13 +34,33 @@ function plantingRow(row: Omit<Planting, 'createdAt' | 'updatedAt' | 'revision'>
   return { ...row, createdAt: SEED_TIME, updatedAt: SEED_TIME, revision: ROW_REVISION };
 }
 
-function surveyRow(row: Omit<Survey, 'createdAt' | 'updatedAt' | 'revision' | 'grade' | 'gradeManual' | 'survivalRate'>, total: number): Survey {
+function surveyRow(row: Omit<Survey, 'createdAt' | 'updatedAt' | 'revision' | 'grade' | 'gradeManual' | 'survivalRate' | 'owner'>, total: number): Survey {
   const survivalRate = calcSurvivalRate(row.aliveCount, total);
   return {
     ...row,
     survivalRate,
     grade: rateLevel(survivalRate),
     gradeManual: false,
+    owner: 'field',
+    createdAt: SEED_TIME,
+    updatedAt: SEED_TIME,
+    revision: ROW_REVISION,
+  };
+}
+
+/** 项目部台账行：缺株数由对账函数按 栽植总株数 − 该测次外业成活株数 算出 */
+function ledgerRow(survey: Survey, plantedTotal: number, surveys: Survey[]): PlotLedger {
+  const result = reconcileLedger({ plotId: survey.plotId, round: survey.round, plantedTotal }, surveys);
+  return {
+    id: `ledger-${survey.plotId}-r${survey.round}`,
+    plotId: survey.plotId,
+    round: survey.round,
+    plantedTotal,
+    missingCount: result.missingCount,
+    latestAliveCount: result.latestAliveCount,
+    reconcileState: result.reconcileState,
+    reconcileNote: result.reconcileNote,
+    date: survey.date,
     createdAt: SEED_TIME,
     updatedAt: SEED_TIME,
     revision: ROW_REVISION,
@@ -132,6 +154,11 @@ export async function seedDatabase(): Promise<void> {
     surveyRow({ id: 'survey-c2', plotId: SEED_IDS.plotC, round: 2, date: '2024-08-30', aliveCount: 7440, avgHeightCm: 88 }, totalByPlot[SEED_IDS.plotC]),
   ];
 
+  // ---------------- 项目部地块台账（每个外业测次一份，按对账算缺株数） ----------------
+  const plotLedgers: PlotLedger[] = surveys.map((survey) =>
+    ledgerRow(survey, totalByPlot[survey.plotId] ?? 0, surveys),
+  );
+
   // ---------------- 补植计划（每地块 1 条，覆盖三种状态） ----------------
   const replants: Replant[] = [
     replantRow({ id: 'replant-a1', plotId: SEED_IDS.plotA, missingCount: 1092, planDate: '2025-04-10', species: '秋茄', state: '待补植' }),
@@ -139,11 +166,16 @@ export async function seedDatabase(): Promise<void> {
     replantRow({ id: 'replant-c1', plotId: SEED_IDS.plotC, missingCount: 560, planDate: '2024-11-05', species: '无瓣海桑', state: '已复核' }),
   ];
 
-  await db.transaction('rw', db.plots, db.seedlings, db.plantings, db.surveys, db.replants, async () => {
-    await db.plots.bulkPut(plots);
-    await db.seedlings.bulkPut(seedlings);
-    await db.plantings.bulkPut(plantings);
-    await db.surveys.bulkPut(surveys);
-    await db.replants.bulkPut(replants);
-  });
+  await db.transaction(
+    'rw',
+    [db.plots, db.seedlings, db.plantings, db.surveys, db.plotLedgers, db.replants],
+    async () => {
+      await db.plots.bulkPut(plots);
+      await db.seedlings.bulkPut(seedlings);
+      await db.plantings.bulkPut(plantings);
+      await db.surveys.bulkPut(surveys);
+      await db.plotLedgers.bulkPut(plotLedgers);
+      await db.replants.bulkPut(replants);
+    },
+  );
 }

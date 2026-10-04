@@ -39,6 +39,7 @@ import { usePlotStore } from '../stores/plotStore';
 import { useSurveyStore } from '../stores/surveyStore';
 import { db } from '../utils/db';
 import { RATE_LEVEL_LABEL, RATE_LEVEL_OPTIONS, type RateLevel, type Survey } from '../types/survey';
+import { DATA_OWNER_LABEL } from '../types/owner';
 import { SURVIVAL_WARN_RATE, percentText } from '../utils/rate';
 
 interface SurveyFormValues {
@@ -154,14 +155,21 @@ export default function SurveyBoard() {
         avgHeightCm: values.avgHeightCm,
       };
       if (editing === null) {
-        const row = await createSurvey(payload);
-        message.success(`已录入第 ${row.round} 测次，成活率 ${row.survivalRate}%`);
-        if (row.survivalRate < SURVIVAL_WARN_RATE) {
-          message.warning(`成活率 ${row.survivalRate}% 低于告警阈值 ${SURVIVAL_WARN_RATE}%，建议生成补植计划`, 6);
+        const { row, duplicated } = await createSurvey(payload);
+        if (duplicated) {
+          message.warning(
+            `第 ${row.round} 测次已交回过，离线重复交回只保留原来那一份，本次未覆盖。`,
+            6,
+          );
+        } else {
+          message.success(`外业已交回第 ${row.round} 测次，成活率 ${row.survivalRate}%`);
+          if (row.survivalRate < SURVIVAL_WARN_RATE) {
+            message.warning(`成活率 ${row.survivalRate}% 低于告警阈值 ${SURVIVAL_WARN_RATE}%，建议生成补植计划`, 6);
+          }
         }
       } else {
         await updateSurvey(editing.id, payload);
-        message.success('验收记录已更新');
+        message.success('外业验收记录已更新');
       }
       setOpen(false);
     } catch (error) {
@@ -187,7 +195,11 @@ export default function SurveyBoard() {
       return;
     }
     const result = await generateReplant(plotId);
-    message.success(result);
+    if (result.includes('挂起')) {
+      message.warning(result, 6);
+    } else {
+      message.success(result);
+    }
   };
 
   const columns: ColumnsType<Survey> = [
@@ -272,6 +284,13 @@ export default function SurveyBoard() {
         record.gradeManual ? <Tag color="purple">人工复核</Tag> : <Tag>自动判定</Tag>,
     },
     {
+      title: '数据归属',
+      dataIndex: 'owner',
+      key: 'owner',
+      width: 112,
+      render: () => <Tag color="geekblue">{DATA_OWNER_LABEL.field}</Tag>,
+    },
+    {
       title: '操作',
       key: 'action',
       width: 150,
@@ -305,6 +324,8 @@ export default function SurveyBoard() {
     return stat.surveyCount > 0 && stat.latestRate < SURVIVAL_WARN_RATE;
   });
 
+  const suspendedPlots = plots.filter((plot) => statOf(plot.id).suspended);
+
   return (
     <div>
       <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 14 }}>
@@ -327,6 +348,24 @@ export default function SurveyBoard() {
         />
       </div>
 
+      {suspendedPlots.length > 0 ? (
+        <Alert
+          type="error"
+          showIcon
+          style={{ marginBottom: 14 }}
+          message={`有 ${suspendedPlots.length} 个地块与项目部台账对账挂起`}
+          description={
+            <Space direction="vertical" size={2}>
+              {suspendedPlots.map((plot) => (
+                <span key={plot.id}>
+                  {plot.name}：{statOf(plot.id).suspendedCount} 个测次挂起待复核，挂起期间不生成补植计划
+                </span>
+              ))}
+            </Space>
+          }
+        />
+      ) : null}
+
       {warnPlots.length > 0 ? (
         <Alert
           type="warning"
@@ -337,7 +376,7 @@ export default function SurveyBoard() {
             <Space direction="vertical" size={2}>
               {warnPlots.map((plot) => (
                 <span key={plot.id}>
-                  {plot.name}：最新成活率 {percentText(statOf(plot.id).latestRate)}，建议补植{' '}
+                  {plot.name}：最新成活率 {percentText(statOf(plot.id).latestRate)}，台账缺株{' '}
                   {statOf(plot.id).suggestReplant} 株
                 </span>
               ))}
@@ -347,14 +386,14 @@ export default function SurveyBoard() {
       ) : null}
 
       <Card
-        title="成活率与株高验收台"
+        title="外业成活率与株高验收台（外业验收队）"
         extra={
           <Space>
             <Button icon={<ToolOutlined />} onClick={() => void handleGenerateReplant()}>
               生成补植计划
             </Button>
             <Button type="primary" icon={<PlusOutlined />} onClick={openCreate} disabled={plots.length === 0}>
-              录入测次
+              外业交回测次
             </Button>
           </Space>
         }
@@ -424,9 +463,9 @@ export default function SurveyBoard() {
 
         {rows.length === 0 && !loading ? (
           <EmptyPanel
-            title="还没有任何验收记录"
-            description="按测次录入成活株数与平均株高，系统会自动计算成活率并在低于阈值时告警。"
-            actionText="录入第一个测次"
+            title="还没有任何外业验收记录"
+            description="外业验收队按测次交回成活株数与平均株高；同地块同测次重复交只留一份。系统自动算成活率，低于阈值告警。"
+            actionText="交回第一个测次"
             onAction={openCreate}
           />
         ) : (
@@ -452,7 +491,7 @@ export default function SurveyBoard() {
       </Card>
 
       <Modal
-        title={editing === null ? '录入验收测次' : '编辑验收测次'}
+        title={editing === null ? '外业交回验收测次' : '编辑外业验收测次'}
         open={open}
         onCancel={() => setOpen(false)}
         onOk={() => void handleSubmit()}
@@ -491,7 +530,8 @@ export default function SurveyBoard() {
             </Form.Item>
           </Space>
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            成活率 = 成活株数 / 该地块栽植总株数，保存时自动计算；成活率低于 {SURVIVAL_WARN_RATE}% 会给出告警提示。
+            本页只交回外业的成活株数与株高；栽植总株数、缺株数归项目部台账，缺株数按「栽植总株数 − 最新成活株数」对账算出。
+            成活率 = 成活株数 / 该地块栽植总株数；离线重复交回同一地块同一测次只留一份，低于 {SURVIVAL_WARN_RATE}% 会告警。
           </Typography.Text>
         </Form>
       </Modal>

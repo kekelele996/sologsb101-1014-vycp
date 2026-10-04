@@ -54,3 +54,8 @@ body {
     padding: 12px !important;
   }
 }
+
+/* 挂起待复核的项目部台账行：浅红底提醒先复核、不发补植计划 */
+.ledger-row-suspended > .ant-table-cell {
+  background-color: #fff1f0 !important;
+}
