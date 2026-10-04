@@ -45,8 +45,10 @@ export interface PlotStat {
   level: RateLevel;
   /** 成活率环比变化（百分点） */
   trend: number;
-  /** 建议补植株数 */
+  /** 建议补植株数（最新测次对平时才有值） */
   suggestReplant: number;
+  /** 挂起待复核的测次数 */
+  suspendedCount: number;
 }
 
 const EMPTY_FILTERS: PlotFilters = { keyword: '', tideZone: 'all', substrate: 'all' };
@@ -105,6 +107,7 @@ const EMPTY_STAT: Omit<PlotStat, 'plotId'> = {
   level: 'poor',
   trend: 0,
   suggestReplant: 0,
+  suspendedCount: 0,
 };
 
 let subscribed = false;
@@ -155,6 +158,7 @@ export const usePlotStore = create<PlotStoreState>((set, get) => ({
                 level: summary.level,
                 trend: summary.trend,
                 suggestReplant: summary.suggestReplant,
+                suspendedCount: summary.suspendedRounds,
               };
             });
             const sorted = [...plots].sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN'));

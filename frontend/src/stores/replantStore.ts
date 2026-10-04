@@ -6,6 +6,7 @@
 import { create } from 'zustand';
 import type { Replant, ReplantDraft, ReplantState } from '../types/replant';
 import {
+  ROW_REVISION,
   advanceReplantState,
   db,
   exportSnapshot,
@@ -114,7 +115,7 @@ export const useReplantStore = create<ReplantStoreState>((set, get) => ({
       state: draft.state,
       createdAt: stamp,
       updatedAt: stamp,
-      revision: 2,
+      revision: ROW_REVISION,
     };
     await putReplant(row);
     set({ revision: get().revision + 1 });

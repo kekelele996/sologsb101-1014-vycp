@@ -9,7 +9,8 @@ import type { Survey } from '../types/survey';
 import type { Planting } from '../types/planting';
 import type { Seedling } from '../types/seedling';
 import type { Replant } from '../types/replant';
-import { RATE_LEVEL_LABEL } from '../types/survey';
+import { RATE_LEVEL_LABEL, RECONCILE_STATE_LABEL } from '../types/survey';
+import { buildReconciliation, latestRoundOf } from './reconcile';
 import { calcSurvivalRate, percentText, round1 } from './rate';
 import { stampSuffix } from './id';
 
@@ -101,17 +102,26 @@ export function exportSummaryCsv(
     '判定等级',
     '平均株高(cm)',
     '缺株数(株)',
+    '最新测次对账',
     '补植计划数',
     '最近补植日期',
   ];
+  const rounds = buildReconciliation(surveys);
   const lines: string[] = [header.map(csvCell).join(',')];
   plots.forEach((plot) => {
     const plotSeedlings = seedlings.filter((row) => row.plotId === plot.id);
     const plotPlantings = plantings.filter((row) => row.plotId === plot.id);
-    const plotSurveys = surveys.filter((row) => row.plotId === plot.id).sort((a, b) => a.round - b.round);
+    const plotFieldRows = surveys
+      .filter((row) => row.plotId === plot.id && row.source === 'field')
+      .sort((a, b) => a.round - b.round);
     const plotReplants = replants.filter((row) => row.plotId === plot.id);
-    const total = plotPlantings.reduce((acc, row) => acc + row.count, 0);
-    const latest = plotSurveys.length > 0 ? plotSurveys[plotSurveys.length - 1] : null;
+    const latest = plotFieldRows.length > 0 ? plotFieldRows[plotFieldRows.length - 1] : null;
+    const latestRecon = latestRoundOf(rounds, plot.id);
+    // 对平时以项目部栽植总株数为分母，否则回退栽植记录合计
+    const total =
+      latestRecon !== null && latestRecon.state === 'matched' && latestRecon.office !== null
+        ? latestRecon.office.totalPlanted
+        : plotPlantings.reduce((acc, row) => acc + row.count, 0);
     const rate = latest ? calcSurvivalRate(latest.aliveCount, total) : 0;
     lines.push(
       [
@@ -124,13 +134,14 @@ export function exportSummaryCsv(
         plotSeedlings.length,
         plotSeedlings.reduce((acc, row) => acc + row.quantity, 0),
         total,
-        plotSurveys.length,
+        plotFieldRows.length,
         latest ? `第 ${latest.round} 测次` : '未验收',
         latest ? latest.aliveCount : 0,
         round1(rate),
         latest ? RATE_LEVEL_LABEL[latest.grade] : '—',
         latest ? latest.avgHeightCm : 0,
-        plot.missingCount,
+        latestRecon !== null && latestRecon.missingCount !== null ? latestRecon.missingCount : plot.missingCount,
+        latestRecon !== null ? RECONCILE_STATE_LABEL[latestRecon.state] : '未验收',
         plotReplants.length,
         plot.lastReplantDate || '—',
       ]
@@ -174,17 +185,27 @@ export function buildSummaryText(
   surveys: Survey[],
   replants: Replant[],
 ): string {
+  const rounds = buildReconciliation(surveys);
   const lines: string[] = [`【红树林修复成活率通报】共 ${plots.length} 个地块`];
   plots.forEach((plot) => {
     const total = plantings.filter((row) => row.plotId === plot.id).reduce((acc, row) => acc + row.count, 0);
-    const plotSurveys = surveys.filter((row) => row.plotId === plot.id).sort((a, b) => a.round - b.round);
-    const latest = plotSurveys.length > 0 ? plotSurveys[plotSurveys.length - 1] : null;
+    const plotFieldRows = surveys
+      .filter((row) => row.plotId === plot.id && row.source === 'field')
+      .sort((a, b) => a.round - b.round);
+    const latest = plotFieldRows.length > 0 ? plotFieldRows[plotFieldRows.length - 1] : null;
+    const latestRecon = latestRoundOf(rounds, plot.id);
     const rate = latest ? calcSurvivalRate(latest.aliveCount, total) : 0;
     const pending = replants.filter((row) => row.plotId === plot.id && row.state !== '已复核').length;
+    const reconText =
+      latestRecon === null
+        ? ''
+        : latestRecon.state === 'suspended'
+          ? `，第 ${latestRecon.round} 测次挂起待复核（${latestRecon.problems.join('；')}）`
+          : '，最新测次已对平';
     lines.push(
       `· ${plot.name}（${plot.tideZone}潮位带 / ${plot.substrate}）栽植 ${total} 株，最新成活率 ${
         latest ? percentText(rate) : '未验收'
-      }，缺株 ${plot.missingCount} 株，待办补植 ${pending} 条`,
+      }，缺株 ${plot.missingCount} 株，待办补植 ${pending} 条${reconText}`,
     );
   });
   return lines.join('\n');

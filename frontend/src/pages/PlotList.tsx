@@ -85,7 +85,8 @@ export default function PlotList() {
         ? 0
         : Math.round((rated.reduce((acc, plot) => acc + statOf(plot.id).latestRate, 0) / rated.length) * 10) / 10;
     const warnCount = plots.filter((plot) => statOf(plot.id).surveyCount > 0 && statOf(plot.id).latestRate < 70).length;
-    return { plantTotal, avgRate, warnCount };
+    const suspendedCount = plots.reduce((acc, plot) => acc + statOf(plot.id).suspendedCount, 0);
+    return { plantTotal, avgRate, warnCount, suspendedCount };
   }, [plots, statOf]);
 
   const openCreate = (): void => {
@@ -203,9 +204,21 @@ export default function PlotList() {
     {
       title: '验收测次',
       key: 'surveyCount',
-      width: 96,
+      width: 110,
       align: 'right',
-      render: (_value, record) => `${statOf(record.id).surveyCount} 次`,
+      render: (_value, record) => {
+        const stat = statOf(record.id);
+        return (
+          <Space direction="vertical" size={0} style={{ alignItems: 'flex-end' }}>
+            <span>{stat.surveyCount} 次</span>
+            {stat.suspendedCount > 0 ? (
+              <Typography.Text type="warning" style={{ fontSize: 12 }}>
+                挂起 {stat.suspendedCount} 次
+              </Typography.Text>
+            ) : null}
+          </Space>
+        );
+      },
     },
     {
       title: '最新成活率',
@@ -305,6 +318,13 @@ export default function PlotList() {
           suffix="块"
           tone={totals.warnCount > 0 ? 'danger' : 'default'}
           hint="成活率低于 70% 的地块数量"
+        />
+        <StatBadge
+          label="挂起待复核测次"
+          value={totals.suspendedCount}
+          suffix="次"
+          tone={totals.suspendedCount > 0 ? 'warning' : 'default'}
+          hint="外业与项目部记录对不上的测次，挂起期间不生成补植计划"
         />
         <StatBadge label="筛选结果" value={rows.length} suffix="块" tone="default" size="small" />
       </div>

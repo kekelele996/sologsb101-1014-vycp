@@ -141,9 +141,15 @@ export function heightGrowth(previousCm: number, currentCm: number): { delta: nu
   return { delta: round1(currentCm - previousCm), pct: round1(((currentCm - previousCm) / previousCm) * 100) };
 }
 
+/** 缺株数：栽植总株数 − 最新成活株数（不低于 0），项目部台账的统一口径 */
+export function calcMissingCount(totalPlanted: number, aliveCount: number): number {
+  if (!Number.isFinite(totalPlanted) || !Number.isFinite(aliveCount)) return 0;
+  return Math.max(0, Math.round(totalPlanted - aliveCount));
+}
+
 /** 补植建议株数：栽植总株数 - 成活株数（不低于 0） */
 export function suggestReplantCount(totalCount: number, aliveCount: number): number {
-  return Math.max(0, Math.round(totalCount - aliveCount));
+  return calcMissingCount(totalCount, aliveCount);
 }
 
 /** 百分比文案 */

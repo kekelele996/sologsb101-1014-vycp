@@ -1,6 +1,6 @@
 /**
  * 演示数据播种（幂等）
- * 父 → 子 → 孙三层链路：地块 → 苗木批次 / 栽植 → 验收 → 补植
+ * 父 → 子 → 孙三层链路：地块 → 苗木批次 / 栽植 → 验收（外业 + 项目部两边分开记）→ 补植
  * 所有 id 固定，保证 /plots/:id/seedlings、/plots/:id/plantings 深链一定命中真实数据。
  */
 import { db, ROW_REVISION } from './db';
@@ -9,7 +9,7 @@ import type { Seedling } from '../types/seedling';
 import type { Planting } from '../types/planting';
 import type { Survey } from '../types/survey';
 import type { Replant } from '../types/replant';
-import { calcSurvivalRate, rateLevel } from './rate';
+import { calcMissingCount, calcSurvivalRate, rateLevel } from './rate';
 
 const SEED_TIME = '2025-01-06T02:00:00.000Z';
 
@@ -32,12 +32,39 @@ function plantingRow(row: Omit<Planting, 'createdAt' | 'updatedAt' | 'revision'>
   return { ...row, createdAt: SEED_TIME, updatedAt: SEED_TIME, revision: ROW_REVISION };
 }
 
-function surveyRow(row: Omit<Survey, 'createdAt' | 'updatedAt' | 'revision' | 'grade' | 'gradeManual' | 'survivalRate'>, total: number): Survey {
+/** 外业验收队那一份：成活株数 + 平均株高 */
+function fieldRow(
+  row: { id: string; plotId: string; round: number; date: string; aliveCount: number; avgHeightCm: number },
+  total: number,
+): Survey {
   const survivalRate = calcSurvivalRate(row.aliveCount, total);
   return {
     ...row,
+    source: 'field',
+    totalPlanted: 0,
+    missingCount: 0,
     survivalRate,
     grade: rateLevel(survivalRate),
+    gradeManual: false,
+    createdAt: SEED_TIME,
+    updatedAt: SEED_TIME,
+    revision: ROW_REVISION,
+  };
+}
+
+/** 项目部那一份：栽植总株数，缺株数按「栽植总株数 − 最新成活株数」算出 */
+function officeRow(
+  row: { id: string; plotId: string; round: number; date: string; totalPlanted: number },
+  aliveCount: number,
+): Survey {
+  return {
+    ...row,
+    source: 'office',
+    aliveCount: 0,
+    avgHeightCm: 0,
+    missingCount: calcMissingCount(row.totalPlanted, aliveCount),
+    survivalRate: 0,
+    grade: rateLevel(0),
     gradeManual: false,
     createdAt: SEED_TIME,
     updatedAt: SEED_TIME,
@@ -114,28 +141,37 @@ export async function seedDatabase(): Promise<void> {
     plantingRow({ id: 'planting-c2', plotId: SEED_IDS.plotC, seedlingId: 'seedling-c2', plantDate: '2024-03-24', spacingM: 1.2, count: 3800, operator: '北屿二班' }),
   ];
 
-  // 各地块栽植总株数，用于派生成活率
+  // 各地块栽植总株数（项目部口径），用于派生成活率与缺株数
   const totalByPlot: Record<string, number> = {
     [SEED_IDS.plotA]: 5200,
     [SEED_IDS.plotB]: 3300,
     [SEED_IDS.plotC]: 8000,
   };
 
-  // ---------------- 验收记录（每地块 2–3 个测次） ----------------
+  // ---------------- 验收测次（外业与项目部各存各的行，按地块 + 测次对账） ----------------
   const surveys: Survey[] = [
-    surveyRow({ id: 'survey-a1', plotId: SEED_IDS.plotA, round: 1, date: '2024-06-20', aliveCount: 4680, avgHeightCm: 62 }, totalByPlot[SEED_IDS.plotA]),
-    surveyRow({ id: 'survey-a2', plotId: SEED_IDS.plotA, round: 2, date: '2024-09-18', aliveCount: 4420, avgHeightCm: 78 }, totalByPlot[SEED_IDS.plotA]),
-    surveyRow({ id: 'survey-a3', plotId: SEED_IDS.plotA, round: 3, date: '2025-03-15', aliveCount: 4108, avgHeightCm: 96 }, totalByPlot[SEED_IDS.plotA]),
-    surveyRow({ id: 'survey-b1', plotId: SEED_IDS.plotB, round: 1, date: '2024-07-05', aliveCount: 2772, avgHeightCm: 41 }, totalByPlot[SEED_IDS.plotB]),
-    surveyRow({ id: 'survey-b2', plotId: SEED_IDS.plotB, round: 2, date: '2024-10-12', aliveCount: 2112, avgHeightCm: 55 }, totalByPlot[SEED_IDS.plotB]),
-    surveyRow({ id: 'survey-c1', plotId: SEED_IDS.plotC, round: 1, date: '2024-05-28', aliveCount: 7680, avgHeightCm: 70 }, totalByPlot[SEED_IDS.plotC]),
-    surveyRow({ id: 'survey-c2', plotId: SEED_IDS.plotC, round: 2, date: '2024-08-30', aliveCount: 7440, avgHeightCm: 88 }, totalByPlot[SEED_IDS.plotC]),
+    // 东港南堤 3 号地块：3 个测次两边都对平
+    fieldRow({ id: 'survey-a1', plotId: SEED_IDS.plotA, round: 1, date: '2024-06-20', aliveCount: 4680, avgHeightCm: 62 }, totalByPlot[SEED_IDS.plotA]),
+    officeRow({ id: 'survey-a1-office', plotId: SEED_IDS.plotA, round: 1, date: '2024-06-22', totalPlanted: totalByPlot[SEED_IDS.plotA] }, 4680),
+    fieldRow({ id: 'survey-a2', plotId: SEED_IDS.plotA, round: 2, date: '2024-09-18', aliveCount: 4420, avgHeightCm: 78 }, totalByPlot[SEED_IDS.plotA]),
+    officeRow({ id: 'survey-a2-office', plotId: SEED_IDS.plotA, round: 2, date: '2024-09-20', totalPlanted: totalByPlot[SEED_IDS.plotA] }, 4420),
+    fieldRow({ id: 'survey-a3', plotId: SEED_IDS.plotA, round: 3, date: '2025-03-15', aliveCount: 4108, avgHeightCm: 96 }, totalByPlot[SEED_IDS.plotA]),
+    officeRow({ id: 'survey-a3-office', plotId: SEED_IDS.plotA, round: 3, date: '2025-03-17', totalPlanted: totalByPlot[SEED_IDS.plotA] }, 4108),
+    // 西湾滩涂 A 区：第 1 测次对平；第 2 测次外业已交、项目部未交回 → 挂起待复核
+    fieldRow({ id: 'survey-b1', plotId: SEED_IDS.plotB, round: 1, date: '2024-07-05', aliveCount: 2772, avgHeightCm: 41 }, totalByPlot[SEED_IDS.plotB]),
+    officeRow({ id: 'survey-b1-office', plotId: SEED_IDS.plotB, round: 1, date: '2024-07-08', totalPlanted: totalByPlot[SEED_IDS.plotB] }, 2772),
+    fieldRow({ id: 'survey-b2', plotId: SEED_IDS.plotB, round: 2, date: '2024-10-12', aliveCount: 2112, avgHeightCm: 55 }, totalByPlot[SEED_IDS.plotB]),
+    // 北屿外滩 B 区：2 个测次两边都对平
+    fieldRow({ id: 'survey-c1', plotId: SEED_IDS.plotC, round: 1, date: '2024-05-28', aliveCount: 7680, avgHeightCm: 70 }, totalByPlot[SEED_IDS.plotC]),
+    officeRow({ id: 'survey-c1-office', plotId: SEED_IDS.plotC, round: 1, date: '2024-05-30', totalPlanted: totalByPlot[SEED_IDS.plotC] }, 7680),
+    fieldRow({ id: 'survey-c2', plotId: SEED_IDS.plotC, round: 2, date: '2024-08-30', aliveCount: 7440, avgHeightCm: 88 }, totalByPlot[SEED_IDS.plotC]),
+    officeRow({ id: 'survey-c2-office', plotId: SEED_IDS.plotC, round: 2, date: '2024-09-01', totalPlanted: totalByPlot[SEED_IDS.plotC] }, 7440),
   ];
 
   // ---------------- 补植计划（每地块 1 条，覆盖三种状态） ----------------
   const replants: Replant[] = [
     replantRow({ id: 'replant-a1', plotId: SEED_IDS.plotA, missingCount: 1092, planDate: '2025-04-10', species: '秋茄', state: '待补植' }),
-    replantRow({ id: 'replant-b1', plotId: SEED_IDS.plotB, missingCount: 1188, planDate: '2025-04-18', species: '白骨壤', state: '已补植' }),
+    replantRow({ id: 'replant-b1', plotId: SEED_IDS.plotB, missingCount: 528, planDate: '2025-04-18', species: '白骨壤', state: '已补植' }),
     replantRow({ id: 'replant-c1', plotId: SEED_IDS.plotC, missingCount: 560, planDate: '2024-11-05', species: '无瓣海桑', state: '已复核' }),
   ];
 

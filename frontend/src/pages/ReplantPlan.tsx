@@ -60,6 +60,7 @@ export default function ReplantPlan() {
   const plantings = usePlotStore((state) => state.plantings);
   const surveys = usePlotStore((state) => state.surveys);
   const statOf = usePlotStore((state) => state.statOf);
+  const summaryOf = usePlotStore((state) => state.summaryOf);
   const ready = usePlotStore((state) => state.ready);
 
   const filters = useReplantStore((state) => state.filters);
@@ -106,13 +107,15 @@ export default function ReplantPlan() {
     const missing = rows.reduce((acc, row) => acc + row.missingCount, 0);
     const reviewed = rows.filter((row) => row.state === '已复核').length;
     const pending = rows.filter((row) => row.state === '待补植').length;
+    const suspended = plots.reduce((acc, plot) => acc + statOf(plot.id).suspendedCount, 0);
     return {
       missing,
       pending,
       reviewed,
+      suspended,
       reviewPct: rows.length === 0 ? 0 : Math.round((reviewed / rows.length) * 1000) / 10,
     };
-  }, [rows]);
+  }, [rows, plots, statOf]);
 
   const openCreate = (): void => {
     setEditing(null);
@@ -143,6 +146,12 @@ export default function ReplantPlan() {
   const handleSubmit = async (): Promise<void> => {
     try {
       const values = await form.validateFields();
+      // 挂起期间不生成补植计划：所选地块最新测次未对平时拒绝
+      const summary = summaryOf(values.plotId);
+      if (summary.suspended) {
+        message.warning(`「${plotName(values.plotId)}」最新测次挂起待复核，挂起期间不生成补植计划`, 6);
+        return;
+      }
       setSubmitting(true);
       const payload: ReplantDraft = {
         plotId: values.plotId,
@@ -226,6 +235,11 @@ export default function ReplantPlan() {
             {statOf(record.plotId).surveyCount > 0 ? percentText(statOf(record.plotId).latestRate) : '未验收'} ·
             栽植 {statOf(record.plotId).plantTotal.toLocaleString('zh-CN')} 株
           </Typography.Text>
+          {statOf(record.plotId).suspendedCount > 0 ? (
+            <Typography.Text type="warning" style={{ fontSize: 12 }}>
+              挂起 {statOf(record.plotId).suspendedCount} 测次待复核
+            </Typography.Text>
+          ) : null}
         </Space>
       ),
     },
@@ -374,6 +388,13 @@ export default function ReplantPlan() {
         <StatBadge label="待补植" value={stats.pending} suffix="条" tone={stats.pending > 0 ? 'warning' : 'default'} />
         <StatBadge label="缺株合计" value={stats.missing.toLocaleString('zh-CN')} suffix="株" tone="danger" />
         <StatBadge
+          label="挂起待复核测次"
+          value={stats.suspended}
+          suffix="次"
+          tone={stats.suspended > 0 ? 'warning' : 'default'}
+          hint="外业与项目部记录对不上的测次，挂起期间不生成补植计划"
+        />
+        <StatBadge
           label="复核完成率"
           value={percentText(stats.reviewPct)}
           percent={stats.reviewPct}
@@ -515,7 +536,8 @@ export default function ReplantPlan() {
             </Form.Item>
           </Space>
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            状态推进到「已补植」时，会自动回写地块缺株数并重算最新一次验收的成活率。
+            状态推进到「已补植」时，会自动回写地块缺株数并重算最新一次验收的成活率；
+            所选地块最新测次挂起待复核时，不生成补植计划。
           </Typography.Text>
         </Form>
       </Modal>

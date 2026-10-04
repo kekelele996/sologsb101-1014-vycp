@@ -3,6 +3,10 @@
 面向红树林修复项目的现场管理人员：按地块登记苗木批次与栽植记录，分次验收成活株数与株高，
 按测次生成成活率趋势，低于阈值时生成补植计划并回写地块缺株数。
 
+**验收测次与项目部台账分开记**：外业验收队只录成活株数与株高，项目部只交栽植总株数
+（缺株数按「栽植总株数 − 最新成活株数」自动算出），两边各存各的记录、互不顶掉；
+按（地块编号 + 测次）对账，对不上的测次先挂起待复核，挂起期间不生成补植计划。
+
 **纯前端单页应用**：无后端、无数据库服务、无 API 调用，数据全部保存在浏览器本地（IndexedDB），
 容器完全无状态、不挂载任何数据卷。
 
@@ -42,7 +46,7 @@ docker compose up -d --build       # 改完代码后重新构建
 | 构建 | Vite 5 | 开发端口与宿主端口一致（22814） |
 | 路由 | React Router 6 | `createBrowserRouter` + 路由懒加载 |
 | 状态管理 | Zustand 4 | 跨页状态集中在 store，页面只读 store |
-| 本地持久化 | Dexie 4（IndexedDB） | 库名 `gbmangrove`，含 v1 → v2 升级迁移 |
+| 本地持久化 | Dexie 4（IndexedDB） | 库名 `gbmangrove`，含 v1 → v2 → v3 升级迁移 |
 | 时间处理 | dayjs | |
 | 容器 | node:20-alpine → nginx:alpine | 多阶段构建，`chmod -R a+rX` 规避静态资源 403 |
 
@@ -71,11 +75,11 @@ sologsb101-1014/
         ├── styles/main.css
         ├── types/              # plot.ts seedling.ts planting.ts survey.ts replant.ts
         ├── stores/             # plotStore.ts surveyStore.ts replantStore.ts
-        ├── components/common/  # RateTag.tsx FilterBar.tsx StatBadge.tsx EmptyPanel.tsx
+        ├── components/common/  # RateTag.tsx ReconcileTag.tsx FilterBar.tsx StatBadge.tsx EmptyPanel.tsx
         ├── hooks/              # useSurvivalRate.ts useIdbTable.ts
         ├── pages/              # 5 个模块页面
         ├── router/index.tsx    # 路由表 + ROUTES 常量
-        └── utils/              # rate.ts db.ts export.ts seed.ts id.ts
+        └── utils/              # rate.ts reconcile.ts db.ts export.ts seed.ts id.ts
 ```
 
 ---
@@ -87,7 +91,7 @@ sologsb101-1014/
 | `/plots` | `pages/PlotList.tsx` | 修复地块台账：新建/编辑/级联删除、按潮位带与底质筛选、回显栽植总株数与最新成活率 |
 | `/plots/:id/seedlings` | `pages/SeedlingBoard.tsx` | 苗木批次与来源登记、批次数量累计校验（含密度提示） |
 | `/plots/:id/plantings` | `pages/PlantingEntry.tsx` | 栽植记录：录株距与株数、按面积与株距校验密度合理性 |
-| `/surveys` | `pages/SurveyBoard.tsx` | 成活率与株高验收台：按测次录入、自动算成活率、低于阈值告警、批量调整成活率等级 |
+| `/surveys` | `pages/SurveyBoard.tsx` | 成活率与株高验收台（对账台）：外业/项目部按测次分开录入、按（地块 + 测次）对账、挂起待复核、项目部重试、离线交回去重、批量调整成活率等级 |
 | `/replants` | `pages/ReplantPlan.tsx` | 补植计划：状态流转（待补植→已补植→已复核）、行内草稿、JSON 导入导出、结构版本查看 |
 
 `/` 重定向到 `/plots`，未匹配路径统一回落到 `/plots`。
@@ -100,11 +104,14 @@ sologsb101-1014/
 
 * **持久化方案**：IndexedDB，通过 Dexie 封装（`src/utils/db.ts`）。
 * **数据库名**：`gbmangrove`。
-* **数据结构版本**：`DB_SCHEMA_VERSION = 2`，`version(1)` 建立全部表，`version(2)` 补齐索引并执行 `.upgrade()` 迁移：
-  * 为 `plots` 增加 `updatedAt`、`surveys` 增加 `[plotId+round]` 复合索引、`plantings` 增加 `spacingM` 索引等；
-  * 回填 `revision` / `createdAt` / `updatedAt`；
-  * 为 `plots` 补齐 `missingCount`、`lastReplantDate` 回写字段；
-  * 为 `surveys` 补齐 `grade`、`gradeManual` 字段（按 `survivalRate` 自动判定等级）。
+* **数据结构版本**：`DB_SCHEMA_VERSION = 3`，`version(1)` 建立全部表，`version(2)` 补齐索引与回写字段，
+  `version(3)` 把验收测次与项目部台账分开记并执行 `.upgrade()` 迁移：
+  * v2：为 `plots` 增加 `updatedAt`、`surveys` 增加 `[plotId+round]` 复合索引、`plantings` 增加 `spacingM` 索引等；
+    回填 `revision` / `createdAt` / `updatedAt`；为 `plots` 补齐 `missingCount`、`lastReplantDate`；
+    为 `surveys` 补齐 `grade`、`gradeManual`；
+  * v3：`surveys` 增加 `source` 与 `[plotId+round+source]` 索引；**旧记录没标来源，升级时按现有测次
+    统一补上外业归属（`source = 'field'`）**，并按（地块 + 测次 + 来源）去重只留最新一份，
+    升上来后即可参与对账；项目部行缺株数按口径重算；全表行修订号升到 3。
 * **表结构**：
 
   | 表 | 主键 | 主要索引 |
@@ -112,14 +119,19 @@ sologsb101-1014/
   | `plots` | id | name, tideZone, substrate, restoreMode, state, createdAt, updatedAt |
   | `seedlings` | id | plotId, species, source, arrivalDate, quantity |
   | `plantings` | id | plotId, seedlingId, plantDate, spacingM |
-  | `surveys` | id | plotId, [plotId+round], date, grade |
+  | `surveys` | id | plotId, [plotId+round], [plotId+round+source], date, grade, source |
   | `replants` | id | plotId, planDate, state, species |
 
+* **`surveys` 表分开记**：同一（地块 + 测次）下最多两条记录——`source = 'field'` 的外业行
+  （成活株数、平均株高）与 `source = 'office'` 的项目部行（栽植总株数、缺株数），
+  两边各写各的行，谁后存都不会顶掉对方。
 * **首屏演示数据**：`initDatabase()` 在打开数据库后检测 `plots` 表是否为空，为空则调用 `utils/seed.ts` 播种，
-  幂等且只执行一次。播种链路为 **地块 → 苗木批次 → 栽植 → 验收 → 补植** 三层互相引用：
+  幂等且只执行一次。播种链路为 **地块 → 苗木批次 → 栽植 → 验收（外业 + 项目部）→ 补植** 三层互相引用：
   * 3 个地块（东港南堤 3 号地块 / 西湾滩涂 A 区 / 北屿外滩 B 区），覆盖三种潮位带与三种底质；
   * 6 个苗木批次（每地块 2 批）、6 条栽植记录（每地块 2 条，引用真实批次 id）；
-  * 7 条验收记录（每地块 2–3 个测次，成活率自洽：90.0% → 85.0% → 79.0% 等）；
+  * 13 条验收/台账记录（外业 7 条 + 项目部 6 条，成活率自洽：90.0% → 85.0% → 79.0% 等）；
+    其中**西湾滩涂 A 区第 2 测次外业已交、项目部未交回，处于挂起待复核**，用于演示
+    「挂起期间不生成补植计划」；
   * 3 条补植计划（覆盖待补植 / 已补植 / 已复核三种状态）。
   * 固定 id 如 `plot-donggang-3`、`plot-xiwan-a`、`plot-beiyu-b` 可直接用于深链验证。
 * **其他本地数据**：`localStorage` 仅保存「最近选中的地块 id」这一界面偏好，不存业务数据。
@@ -147,8 +159,22 @@ npm run preview      # 预览 dist 产物
 
 ## 七、核心业务规则
 
-* **成活率** = 成活株数 ÷ 该地块栽植总株数 × 100%（`src/utils/rate.ts` 统一口径）。
+* **分开记**：成活株数与平均株高归外业验收队（`source = 'field'`），栽植总株数与缺株数归项目部
+  （`source = 'office'`）；两边各写各的记录，同一（地块 + 测次 + 来源）只留一份，谁后存都不会顶掉对方。
+* **缺株数口径**：缺株数 = 栽植总株数 − 最新成活株数（`src/utils/rate.ts` 的 `calcMissingCount`），
+  由系统算出，不由项目部手填；对平后回写地块台账缺株数，挂起时保持原值不动。
+* **对账**：按（地块编号 + 测次）配对两边记录（`src/utils/reconcile.ts` 纯函数）。缺任何一方、
+  成活株数超过栽植总株数、或缺株数与口径不符 → **挂起待复核**；两边都在且数值自洽 → **对平**。
+* **挂起期间不生成补植计划**：生成补植计划（含手动新建）要求该地块最新测次已对平，
+  补植株数取对平测次的项目部缺株数，避免按过期/未复核的成活率发计划。
+* **离线交回**：批量交回时同一（地块 + 测次 + 来源）重复的记录只留最新一份（批内与库内都去重）；
+  项目部对账失败后可点「项目部重试」，只按最新外业成活株数重存项目部那一份，外业测次照旧。
+* **升级迁移**：v2 及以前的旧记录没标来源，升级到 v3 时按现有测次补上外业归属并去重，
+  升上来后照常参与对账。
+* **成活率** = 成活株数 ÷ 栽植总株数 × 100%（`src/utils/rate.ts` 统一口径）；对平测次以项目部
+  栽植总株数为分母，挂起测次回退栽植记录合计并标注「暂定」。
 * **成活率等级**：≥ 85% 优，70%–85% 良，50%–70% 一般，< 50% 差；低于 50% 视为告警，建议生成补植计划。
 * **密度合理性**：平均单株占地面积需落在 0.6–12 ㎡/株；过密/过疏都会在栽植记录页给出提示。
 * **补植回写**：补植状态推进到「已补植」时，自动扣减地块缺株数、写入最近补植日期，
-  并按「原成活株数 + 本次补植株数」重算最新一次验收的成活率。
+  按「原成活株数 + 本次补植株数」重算最新一次外业测次的成活率，并同步重算同测次项目部行的缺株数，
+  保持两边对平。
